@@ -1,127 +1,287 @@
 from __future__ import annotations
 
-import argparse
 import math
-import os
-import socket
-import threading
-import webbrowser
-from pathlib import Path
+from dataclasses import dataclass
+from datetime import datetime
 
-from flask import Flask, jsonify, request, send_from_directory
-
-from tracker import fetch_histories, fetch_history, fetch_quote, fetch_quotes, quote_to_dict
-
-BASE_DIR = Path(__file__).resolve().parent
-WEB_DIR = BASE_DIR / "web"
-DEFAULT_PORT = 8768
-
-app = Flask(__name__, static_folder=str(WEB_DIR), static_url_path="")
+import yfinance as yf
 
 
-def sanitize_json(value: object) -> object:
-    if isinstance(value, dict):
-        return {key: sanitize_json(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [sanitize_json(item) for item in value]
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
+PERIOD_MAP = {
+    "5d": {"period": "5d", "interval": "1h"},
+    "1mo": {"period": "1mo", "interval": "1d"},
+    "3mo": {"period": "3mo", "interval": "1d"},
+    "6mo": {"period": "6mo", "interval": "1d"},
+    "1y": {"period": "1y", "interval": "1d"},
+    "2y": {"period": "2y", "interval": "1wk"},
+    "5y": {"period": "5y", "interval": "1mo"},
+}
+
+HISTORY_FALLBACKS = {
+    "1y": [
+        {"period": "12mo", "interval": "1d"},
+        {"period": "1y", "interval": "1wk"},
+    ],
+}
+
+YIELD_SYMBOLS = {
+    "^IRX",
+    "^FVX",
+    "^TNX",
+    "^TYX",
+}
+
+BOND_ETF_SYMBOLS = {
+    "SHY",
+    "IEI",
+    "IEF",
+    "TLT",
+    "UTWY",
+    "GOVT",
+    "TIP",
+    "BND",
+    "AGG",
+    "LQD",
+    "HYG",
+}
+
+BOND_NAME_KEYWORDS = (
+    "treasury",
+    "bond",
+    "aggregate",
+    "fixed income",
+    "tips",
+    "corporate bond",
+    "high yield",
+    "municipal",
+    "債券",
+    "公債",
+)
 
 
-def json_response(payload: object, status: int = 200) -> object:
-    return jsonify(sanitize_json(payload)), status
+@dataclass
+class Quote:
+    symbol: str
+    name: str
+    currency: str
+    price: float
+    previous_close: float
+    change: float
+    change_percent: float
+    day_high: float | None
+    day_low: float | None
+    volume: int | None
+    market_cap: int | None
+    fifty_two_week_high: float | None
+    fifty_two_week_low: float | None
+    updated_at: str
+    instrument_type: str = "stock"
+    price_label: str = "現價"
+    unit: str = ""
 
 
-@app.get("/")
-def index() -> object:
-    return send_from_directory(WEB_DIR, "index.html")
+def normalize_symbol(symbol: str) -> str:
+    return symbol.strip().upper()
 
 
-@app.get("/health")
-def health() -> object:
-    return json_response({"status": "ok"})
+def detect_instrument_type(info: dict, symbol: str) -> tuple[str, str, str]:
+    if symbol in YIELD_SYMBOLS:
+        return "yield", "殖利率", "%"
+
+    if symbol in BOND_ETF_SYMBOLS:
+        return "bond_etf", "淨值", "USD"
+
+    quote_type = (info.get("quoteType") or "").upper()
+    name = (info.get("shortName") or info.get("longName") or "").lower()
+
+    if quote_type in {"ETF", "MUTUALFUND"} and any(keyword in name for keyword in BOND_NAME_KEYWORDS):
+        return "bond_etf", "淨值", info.get("currency") or "USD"
+
+    if quote_type == "INDEX" and any(keyword in name for keyword in ("treasury", "yield", "t-note", "t-bill")):
+        return "yield", "殖利率", "%"
+
+    return "stock", "現價", info.get("currency") or ""
 
 
-@app.get("/api/quote/<symbol>")
-def get_quote(symbol: str) -> object:
-    try:
-        quote = fetch_quote(symbol)
-        return json_response(quote_to_dict(quote))
-    except Exception as exc:
-        return json_response({"error": str(exc)}, 400)
+def _price_digits(instrument_type: str) -> int:
+    return 3 if instrument_type == "yield" else 4
 
 
-@app.post("/api/quotes")
-def get_quotes() -> object:
-    payload = request.get_json(silent=True) or {}
-    symbols = payload.get("symbols", [])
+def _quote_from_ticker(ticker: yf.Ticker, normalized: str) -> Quote:
+    info = ticker.info
 
-    if not isinstance(symbols, list) or not symbols:
-        return json_response({"error": "請提供至少一個股票代號"}, 400)
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    previous_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
 
-    return json_response(fetch_quotes(symbols))
+    if price is None or previous_close is None:
+        history = ticker.history(period="5d")
+        if history.empty:
+            raise ValueError(f"找不到股票代號：{normalized}")
 
+        price = float(history["Close"].iloc[-1])
+        previous_close = float(history["Close"].iloc[-2]) if len(history) > 1 else price
 
-@app.post("/api/histories")
-def get_histories() -> object:
-    payload = request.get_json(silent=True) or {}
-    symbols = payload.get("symbols", [])
-    period = payload.get("period", "1mo")
+    change = float(price) - float(previous_close)
+    change_percent = (change / float(previous_close) * 100) if previous_close else 0.0
+    instrument_type, price_label, unit = detect_instrument_type(info, normalized)
+    digits = _price_digits(instrument_type)
 
-    if not isinstance(symbols, list) or not symbols:
-        return json_response({"error": "請提供至少一個股票代號"}, 400)
-
-    return json_response(fetch_histories(symbols, period))
-
-
-@app.get("/api/history/<symbol>")
-def get_history(symbol: str) -> object:
-    period = request.args.get("period", "1mo")
-    try:
-        return json_response(fetch_history(symbol, period))
-    except Exception as exc:
-        return json_response({"error": str(exc)}, 400)
-
-
-def local_ip() -> str | None:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            return sock.getsockname()[0]
-    except OSError:
-        return None
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="股價趨勢追蹤網頁伺服器")
-    parser.add_argument(
-        "--share",
-        action="store_true",
-        help="允許同一區域網路內的其他裝置連線",
+    return Quote(
+        symbol=normalized,
+        name=info.get("shortName") or info.get("longName") or normalized,
+        currency=info.get("currency") or "",
+        price=round(float(price), digits),
+        previous_close=round(float(previous_close), digits),
+        change=round(change, digits),
+        change_percent=round(change_percent, 2),
+        day_high=_optional_float(info.get("dayHigh") or info.get("regularMarketDayHigh"), digits),
+        day_low=_optional_float(info.get("dayLow") or info.get("regularMarketDayLow"), digits),
+        volume=_optional_int(info.get("volume") or info.get("regularMarketVolume")),
+        market_cap=_optional_int(info.get("marketCap")),
+        fifty_two_week_high=_optional_float(info.get("fiftyTwoWeekHigh"), digits),
+        fifty_two_week_low=_optional_float(info.get("fiftyTwoWeekLow"), digits),
+        updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        instrument_type=instrument_type,
+        price_label=price_label,
+        unit=unit,
     )
-    args = parser.parse_args()
 
-    port = int(os.environ.get("PORT", DEFAULT_PORT))
-    host = "0.0.0.0" if args.share else "127.0.0.1"
-    local_url = f"http://127.0.0.1:{port}"
 
-    print(f"股價趨勢追蹤：{local_url}")
-    if args.share:
-        ip = local_ip()
-        if ip:
-            print(f"區域網路分享：http://{ip}:{port}")
-            print("同一 WiFi 或區域網路內的裝置，可用上方網址開啟")
+def fetch_quote(symbol: str) -> Quote:
+    normalized = normalize_symbol(symbol)
+    return _quote_from_ticker(yf.Ticker(normalized), normalized)
+
+
+def fetch_quotes(symbols: list[str]) -> dict:
+    normalized_symbols = [normalize_symbol(symbol) for symbol in symbols if symbol.strip()]
+    unique_symbols = list(dict.fromkeys(normalized_symbols))
+
+    quotes: list[dict] = []
+    errors: list[dict] = []
+
+    for symbol in unique_symbols:
+        try:
+            quotes.append(quote_to_dict(fetch_quote(symbol)))
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)})
+
+    return {"quotes": quotes, "errors": errors}
+
+
+def fetch_history(symbol: str, period_key: str = "1mo") -> dict:
+    normalized = normalize_symbol(symbol)
+    config = PERIOD_MAP.get(period_key, PERIOD_MAP["1mo"])
+    configs_to_try = [config, *HISTORY_FALLBACKS.get(period_key, [])]
+
+    ticker = yf.Ticker(normalized)
+    history = None
+    used_interval = config["interval"]
+
+    for attempt in configs_to_try:
+        attempt_history = ticker.history(period=attempt["period"], interval=attempt["interval"])
+        if not attempt_history.empty:
+            history = attempt_history
+            used_interval = attempt["interval"]
+            break
+
+    if history is None or history.empty:
+        raise ValueError(f"無法取得 {normalized} 的歷史資料")
+
+    history = history.copy()
+    history["Close"] = history["Close"].ffill().bfill()
+
+    labels: list[str] = []
+    prices: list[float] = []
+
+    for index, row in history.iterrows():
+        close = _finite_float(row["Close"])
+        if close is None:
+            continue
+
+        if used_interval in {"1h", "1d"}:
+            labels.append(index.strftime("%Y-%m-%d %H:%M"))
+        elif used_interval == "1wk":
+            labels.append(index.strftime("%Y-%m-%d"))
         else:
-            print("無法偵測本機 IP，請在終端機執行 ipconfig 查看 IPv4 位址")
-        print("若 Windows 防火牆詢問，請允許 Python 存取私人網路")
-    else:
-        print("僅本機可連線。若要分享給同網路的人，請加上 --share 參數")
-    print("按 Ctrl+C 可停止伺服器")
+            labels.append(index.strftime("%Y-%m"))
 
-    threading.Timer(1.0, lambda: webbrowser.open(local_url)).start()
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+        prices.append(close)
+
+    if not prices:
+        raise ValueError(f"無法取得 {normalized} 的有效歷史資料")
+
+    start_price = prices[0]
+    end_price = prices[-1]
+    trend_change = end_price - start_price
+    trend_percent = (trend_change / start_price * 100) if start_price else 0.0
+
+    return {
+        "symbol": normalized,
+        "period": period_key,
+        "labels": labels,
+        "prices": prices,
+        "start_price": start_price,
+        "end_price": end_price,
+        "trend_change": round(trend_change, 4),
+        "trend_percent": round(trend_percent, 2),
+    }
 
 
-if __name__ == "__main__":
-    main()
+def fetch_histories(symbols: list[str], period_key: str = "1mo") -> dict:
+    normalized_symbols = [normalize_symbol(symbol) for symbol in symbols if symbol.strip()]
+    unique_symbols = list(dict.fromkeys(normalized_symbols))
+
+    histories: list[dict] = []
+    errors: list[dict] = []
+
+    for symbol in unique_symbols:
+        try:
+            histories.append(fetch_history(symbol, period_key))
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)})
+
+    return {"histories": histories, "errors": errors}
+
+
+def quote_to_dict(quote: Quote) -> dict:
+    return {
+        "symbol": quote.symbol,
+        "name": quote.name,
+        "currency": quote.currency,
+        "price": quote.price,
+        "previous_close": quote.previous_close,
+        "change": quote.change,
+        "change_percent": quote.change_percent,
+        "day_high": quote.day_high,
+        "day_low": quote.day_low,
+        "volume": quote.volume,
+        "market_cap": quote.market_cap,
+        "fifty_two_week_high": quote.fifty_two_week_high,
+        "fifty_two_week_low": quote.fifty_two_week_low,
+        "updated_at": quote.updated_at,
+        "instrument_type": quote.instrument_type,
+        "price_label": quote.price_label,
+        "unit": quote.unit,
+    }
+
+
+def _finite_float(value: object, digits: int = 4) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return round(number, digits)
+
+
+def _optional_float(value: object, digits: int = 4) -> float | None:
+    return _finite_float(value, digits)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)

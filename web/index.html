@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="追蹤台股、美股、ETF 與美國債券的即時報價與走勢圖">
+  <meta name="theme-color" content="#0f172a">
+  <title>股價趨勢追蹤</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h1>股價追蹤</h1>
+        <p class="subtitle">追蹤台股、美股、ETF 與美國債券</p>
+      </div>
+
+      <form id="add-form" class="add-form">
+        <label for="symbol-input">代號</label>
+        <div class="add-row">
+          <input
+            id="symbol-input"
+            type="text"
+            placeholder="例如 2330.TW、^TNX、TLT"
+            autocomplete="off"
+          >
+          <button type="submit">加入</button>
+        </div>
+      </form>
+
+      <div class="watchlist-header">
+        <span>追蹤清單</span>
+        <button id="refresh-all-btn" type="button" class="ghost-btn">全部更新</button>
+      </div>
+      <ul id="watchlist" class="watchlist"></ul>
+
+      <p class="note">
+        資料來源為 Yahoo Finance，僅供參考，不構成投資建議。
+        報價可能有 15～20 分鐘延遲。
+      </p>
+    </aside>
+
+    <main class="content">
+      <div class="content-toolbar">
+        <div class="view-tabs" id="view-tabs">
+          <button type="button" data-view="overview" class="active">總覽</button>
+          <button type="button" data-view="charts">走勢圖</button>
+          <button type="button" data-view="detail">詳細</button>
+        </div>
+        <p class="toolbar-updated" id="overview-updated"></p>
+      </div>
+
+      <section id="empty-state" class="empty-state">
+        <h2>選擇或加入標的</h2>
+        <p>從左側清單選擇，或輸入代號加入追蹤。</p>
+        <ul class="examples">
+          <li><strong>2330.TW</strong> — 台積電</li>
+          <li><strong>AAPL</strong> — Apple</li>
+          <li><strong>^TNX</strong> — 美國 10 年期公債殖利率</li>
+          <li><strong>TLT</strong> — 20 年以上美債 ETF</li>
+        </ul>
+      </section>
+
+      <section id="overview-panel" class="overview-panel" hidden>
+        <div class="overview-summary">
+          <div class="summary-card">
+            <span>追蹤檔數</span>
+            <strong id="summary-count">0</strong>
+          </div>
+          <div class="summary-card up">
+            <span>上漲</span>
+            <strong id="summary-up">0</strong>
+          </div>
+          <div class="summary-card down">
+            <span>下跌</span>
+            <strong id="summary-down">0</strong>
+          </div>
+          <div class="summary-card flat">
+            <span>持平</span>
+            <strong id="summary-flat">0</strong>
+          </div>
+        </div>
+
+        <div class="overview-table-wrap">
+          <table class="overview-table">
+            <thead>
+              <tr>
+                <th data-sort="symbol">代號</th>
+                <th data-sort="name">名稱</th>
+                <th data-sort="price">報價</th>
+                <th data-sort="change">漲跌</th>
+                <th data-sort="change_percent">漲跌幅</th>
+                <th data-sort="day_high">最高</th>
+                <th data-sort="day_low">最低</th>
+                <th data-sort="volume">成交量</th>
+              </tr>
+            </thead>
+            <tbody id="overview-body"></tbody>
+          </table>
+        </div>
+
+        <p class="overview-hint">點選任一列可查看該股票的詳細走勢圖</p>
+      </section>
+
+      <section id="charts-panel" class="charts-panel" hidden>
+        <div class="charts-toolbar">
+          <div class="period-tabs" id="charts-period-tabs">
+            <button type="button" data-period="5d">5 日</button>
+            <button type="button" data-period="1mo" class="active">1 月</button>
+            <button type="button" data-period="3mo">3 月</button>
+            <button type="button" data-period="6mo">6 月</button>
+            <button type="button" data-period="1y">1 年</button>
+            <button type="button" data-period="2y">2 年</button>
+            <button type="button" data-period="5y">5 年</button>
+          </div>
+
+          <div class="charts-toolbar-actions">
+            <label class="chart-count-control">
+              <span>同時顯示</span>
+              <select id="chart-display-count">
+                <option value="1">1 個</option>
+                <option value="2">2 個</option>
+                <option value="3">3 個</option>
+                <option value="4" selected>4 個</option>
+                <option value="6">6 個</option>
+                <option value="8">8 個</option>
+                <option value="10">10 個</option>
+                <option value="12">12 個</option>
+                <option value="16">16 個</option>
+                <option value="20">20 個</option>
+                <option value="all">全部</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="charts-pagination" id="charts-pagination" hidden>
+          <button type="button" id="charts-prev-btn" class="ghost-btn">上一頁</button>
+          <span id="charts-page-label"></span>
+          <button type="button" id="charts-next-btn" class="ghost-btn">下一頁</button>
+        </div>
+
+        <div id="charts-grid" class="charts-grid"></div>
+
+        <p class="overview-hint">拖曳卡片可調整順序；8～20 個走勢會自動縮放至一屏顯示；點選卡片可查看詳細資訊</p>
+      </section>
+
+      <section id="detail-panel" class="detail-panel" hidden>
+        <header class="detail-header">
+          <div>
+            <p class="symbol-label" id="detail-symbol"></p>
+            <h2 id="detail-name"></h2>
+          </div>
+          <div class="price-block">
+            <div class="price-row">
+              <span id="detail-price" class="price"></span>
+              <span id="detail-currency" class="currency"></span>
+            </div>
+            <p id="detail-change" class="change"></p>
+            <p class="updated-at" id="detail-updated"></p>
+          </div>
+        </header>
+
+        <div class="period-tabs" id="period-tabs">
+          <button type="button" data-period="5d">5 日</button>
+          <button type="button" data-period="1mo" class="active">1 月</button>
+          <button type="button" data-period="3mo">3 月</button>
+          <button type="button" data-period="6mo">6 月</button>
+          <button type="button" data-period="1y">1 年</button>
+          <button type="button" data-period="2y">2 年</button>
+          <button type="button" data-period="5y">5 年</button>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="price-chart"></canvas>
+        </div>
+
+        <div class="trend-summary">
+          <div class="stat-card">
+            <span>區間漲跌</span>
+            <strong id="trend-change"></strong>
+          </div>
+          <div class="stat-card">
+            <span>區間漲跌幅</span>
+            <strong id="trend-percent"></strong>
+          </div>
+          <div class="stat-card">
+            <span>區間起始</span>
+            <strong id="trend-start"></strong>
+          </div>
+          <div class="stat-card">
+            <span>區間結束</span>
+            <strong id="trend-end"></strong>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <span id="stat-prev-label">前一日收盤</span>
+            <strong id="stat-prev-close"></strong>
+          </div>
+          <div class="stat-card">
+            <span id="stat-high-label">今日最高</span>
+            <strong id="stat-day-high"></strong>
+          </div>
+          <div class="stat-card">
+            <span id="stat-low-label">今日最低</span>
+            <strong id="stat-day-low"></strong>
+          </div>
+          <div class="stat-card" id="stat-volume-card">
+            <span>成交量</span>
+            <strong id="stat-volume"></strong>
+          </div>
+          <div class="stat-card">
+            <span id="stat-52-high-label">52 週最高</span>
+            <strong id="stat-52-high"></strong>
+          </div>
+          <div class="stat-card">
+            <span id="stat-52-low-label">52 週最低</span>
+            <strong id="stat-52-low"></strong>
+          </div>
+          <div class="stat-card" id="stat-market-cap-card">
+            <span>市值</span>
+            <strong id="stat-market-cap"></strong>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
