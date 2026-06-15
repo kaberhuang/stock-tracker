@@ -1173,6 +1173,17 @@ async function refreshAll() {
       console.warn(failed);
     }
 
+    if (data.quotes.length === 0) {
+      const message = data.errors?.length
+        ? data.errors.map((item) => `${item.symbol}: ${item.error}`).join("\n")
+        : "無法取得股價資料，請稍後再按「全部更新」";
+      throw new Error(message);
+    }
+
+    if (data.errors?.length) {
+      alert(`部分標的更新失敗：\n${data.errors.map((item) => `${item.symbol}: ${item.error}`).join("\n")}`);
+    }
+
     renderWatchlist();
     renderOverview();
     updatePanelsVisibility();
