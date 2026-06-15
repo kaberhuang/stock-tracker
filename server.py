@@ -12,6 +12,11 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from tracker import fetch_histories, fetch_history, fetch_quote, fetch_quotes, quote_to_dict
 
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:
+    curl_requests = None
+
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 DEFAULT_PORT = 8768
@@ -35,12 +40,29 @@ def json_response(payload: object, status: int = 200) -> object:
 
 @app.get("/")
 def index() -> object:
+    index_path = WEB_DIR / "index.html"
+    if not index_path.exists():
+        return json_response(
+            {
+                "error": "找不到 web/index.html，請確認 GitHub 有上傳 web 資料夾",
+                "web_dir": str(WEB_DIR),
+            },
+            500,
+        )
     return send_from_directory(WEB_DIR, "index.html")
 
 
 @app.get("/health")
 def health() -> object:
-    return json_response({"status": "ok"})
+    index_path = WEB_DIR / "index.html"
+    return json_response(
+        {
+            "status": "ok",
+            "web_dir_exists": WEB_DIR.exists(),
+            "index_exists": index_path.exists(),
+            "curl_cffi_enabled": curl_requests is not None,
+        }
+    )
 
 
 @app.get("/api/quote/<symbol>")
